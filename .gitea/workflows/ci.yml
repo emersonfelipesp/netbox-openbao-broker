@@ -1,0 +1,106 @@
+---
+name: CI
+
+# Pre-merge gate.
+#
+# Unlike the plugin's CI, this one runs the *whole* suite. The broker has no
+# database, no NetBox, and no external services: the mTLS tests mint their own
+# CA and run the broker as a subprocess against a fake vault, so there is
+# nothing an untrusted runner cannot provide. That means the security
+# properties this service exists for — refusals never reach OpenBao, identity
+# comes from the peer certificate — are actually gated here rather than
+# deferred to a local run.
+#
+# Runner: `ci-untrusted-python312` is the estate's label for untrusted CI,
+# served for this account by the user-scoped `ci-untrusted-emersonfelipesp`
+# runner. It has no service containers and does not fetch actions over the
+# network, which is why this uses `uv` from the image rather than
+# `actions/setup-python`.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: netbox-openbao-broker-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  quality:
+    name: Lint, tests, and build
+    runs-on: ci-untrusted-python312
+    timeout-minutes: 20
+    env:
+      HOME: ${{ github.workspace }}
+      UV_CACHE_DIR: ${{ github.workspace }}/.uv-cache
+      UV_PYTHON_DOWNLOADS: never
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Create the environment
+        shell: bash
+        run: |
+          set -euo pipefail
+          command -v uv
+          uv venv --python 3.12 .venv
+          uv pip install --python .venv/bin/python -e '.[dev]'
+
+      - name: Ruff
+        shell: bash
+        run: |
+          set -euo pipefail
+          .venv/bin/ruff check .
+
+      - name: Tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          .venv/bin/python -m pytest -q -ra --junitxml=results.xml
+
+      - name: No test may be skipped
+        shell: bash
+        run: |
+          set -euo pipefail
+          # A skipped test in this repository is a silent hole: the mTLS suite
+          # is the only thing that checks identity extraction end to end, and a
+          # green pipeline that quietly did not run it is worse than a red one.
+          # The fixture itself fails rather than skips; this is the backstop for
+          # any skip a later change introduces.
+          .venv/bin/python - <<'PY'
+          import sys, xml.etree.ElementTree as ET
+
+          suite = ET.parse('results.xml').getroot()
+          if suite.tag != 'testsuite':
+              suite = suite.find('testsuite')
+
+          skipped = int(suite.get('skipped', '0'))
+          total = int(suite.get('tests', '0'))
+          print(f'{total} tests, {skipped} skipped')
+          if skipped or not total:
+              sys.exit(f'Refusing a green build: {skipped} skipped of {total}.')
+          PY
+
+      - name: The OpenAPI schema must stay unserved
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Enabling it is a one-word change to create_app() and would publish
+          # the API surface to anything that reaches the port. Tested at
+          # runtime too; this catches it in the source as well, because the
+          # runtime test only proves the current default.
+          ! grep -nE '^\s*(docs_url|redoc_url|openapi_url)\s*=\s*[^N]' broker/app.py
+
+      - name: Build
+        shell: bash
+        run: |
+          set -euo pipefail
+          uv build --python .venv/bin/python

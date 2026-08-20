@@ -1,0 +1,30 @@
+# Copy to config.toml alongside docker-compose.yml, or to
+# /etc/netbox-openbao-broker/config.toml for the systemd unit.
+#
+# Nothing secret belongs in this file. The AppRole RoleID and SecretID come
+# from the environment, or from the files BROKER_BAO_*_FILE points at. Putting
+# the SecretID here would relocate the problem this service exists to solve
+# rather than fix it — config files get copied, backed up, and committed.
+
+[openbao]
+url = "https://bao.example.net:8200"
+kv_mount = "secret"
+auth_method = "approle"
+env_prefix = "BROKER_BAO"
+tls_verify = true
+# ca_cert_path = "/etc/netbox-openbao-broker/tls/openbao-ca.pem"
+# namespace = "admin"
+
+# The key is matched against the client certificate's subject CN. A
+# certificate that is cryptographically valid but names no configured instance
+# is refused — one mis-issued certificate must not be full vault access.
+
+[instances.netbox-prod]
+path_prefixes = ["netbox/credentials"]
+may_write = true
+may_delete = false
+
+[instances.netbox-staging]
+path_prefixes = ["netbox-staging/credentials"]
+may_write = true
+may_delete = true

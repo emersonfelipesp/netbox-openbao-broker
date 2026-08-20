@@ -1,0 +1,12 @@
+.git
+.github
+.gitea
+.pytest_cache
+.ruff_cache
+*.egg-info
+__pycache__
+deploy
+docs
+tests
+venv
+.venv
