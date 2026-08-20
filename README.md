@@ -65,6 +65,15 @@ step with the first.
 | `POST /v1/secret/metadata/write` | `path`, `custom_metadata` | `{"updated": true}` |
 | `GET /healthz` | — | `{"ok": true, "openbao": {...}}` |
 
+Paths are restricted to printable ASCII with no spaces and **no
+percent-encoding**. That last one is not fussiness: `requests`, which `hvac`
+uses, decodes `%2e` back to `.` while building the URL, so a path checked as
+`netbox/credentials/%2e%2e/%2e%2e/production/root` leaves this process as
+`.../netbox/credentials/../../production/root`. OpenBao 2.6.0 declines to
+resolve that, which is a fine thing to be true and a poor thing to depend on —
+so the broker refuses it rather than leaving the boundary to someone else's
+routing.
+
 Interactive docs and the OpenAPI schema are **not served**. They are a second,
 differently-shaped surface on a service whose value is being small and
 predictable, and the schema enumerates the API for anyone who reaches the port.
@@ -160,6 +169,12 @@ wants to find, and a log that records only successes is a log of the wrong half.
 `AuditLog.record()` takes named non-secret fields and nothing else. There is no
 parameter a payload could be passed through, which is a stronger guarantee than
 remembering not to pass one.
+
+Every request that reaches a secret operation leaves a record, including ones
+that never reached a handler: body validation runs before the caller is
+identified, so a malformed request is audited as `operation=malformed` rather
+than disappearing into a 422. An attempt to read a secret is what an operator
+reconstructing an incident wants to find, whether or not it parsed.
 
 ## Running it
 

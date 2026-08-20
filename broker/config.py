@@ -87,13 +87,37 @@ def normalize_path(raw: str) -> str:
     null byte is rejected outright — none of them has a legitimate meaning in a
     KV path.
 
+    **Percent-encoding is rejected for the same reason, and the reason is not
+    theoretical.** `requests` — which `hvac` uses — runs every URL through
+    `requote_uri`, and that calls `unquote_unreserved`, which decodes any escape
+    whose character is unreserved. `.` is unreserved, so `%2e%2e/` becomes `../`
+    *after* this function has approved the path. The literal check above would
+    have passed and the URL leaving the process would contain a traversal.
+
+    Whether that traversal then resolves is up to the server: OpenBao 2.6.0 does
+    not collapse dot-segments and refuses it. That is a fine thing to be true and
+    a terrible thing to depend on — it makes the boundary a property of the
+    server's routing rather than of this check, and a proxy, a version bump, or a
+    different KV implementation silently removes it. So `%` is refused here.
+
+    Characters outside printable ASCII go with it. Nothing the plugin generates
+    needs them — its paths are `<prefix>/<uuid>` — and admitting them means
+    admitting whatever some later layer's Unicode normalization decides
+    `U+FF0F FULLWIDTH SOLIDUS` ought to become.
+
     Raises `ValueError` for anything unacceptable.
     """
     if not raw or not isinstance(raw, str):
         raise ValueError('path must be a non-empty string')
 
-    if '\x00' in raw or '\\' in raw:
+    if '\\' in raw:
         raise ValueError('path contains an illegal character')
+
+    if '%' in raw:
+        raise ValueError('path must not be percent-encoded')
+
+    if any(not ('\x21' <= character <= '\x7e') for character in raw):
+        raise ValueError('path must be printable ASCII without spaces')
 
     if raw.startswith('/'):
         raise ValueError('path must be relative to the KV mount')

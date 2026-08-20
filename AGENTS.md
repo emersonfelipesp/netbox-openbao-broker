@@ -33,6 +33,17 @@ Each of these looks like a mistake and is not. Verify before "fixing".
 - **`docs_url=None` alone does not stop FastAPI serving `/openapi.json`.**
   `openapi_url=None` is what does. CI greps for this as well as testing it.
 
+- **`normalize_path` refuses `%`, and this is load-bearing.** `requests` runs
+  every URL through `requote_uri` → `unquote_unreserved`, which decodes escapes
+  for unreserved characters. `.` is unreserved, so `%2e%2e/` becomes `../`
+  *after* the check has passed. OpenBao 2.6.0 does not resolve the resulting
+  dot-segments, so the live attempt 404s — do not read that as "the encoding
+  rule is unnecessary". It means the boundary would otherwise live in OpenBao's
+  routing rather than in this repository.
+  `tests/test_encoded_traversal.py` pins both the refusal and the underlying
+  property: whatever the check accepts must still be inside the prefix after
+  `requote_uri` has rewritten it.
+
 - **`ssl_cert_reqs=CERT_REQUIRED` is a property of the socket, so it gates
   `/healthz` too.** The endpoint is unauthenticated only at the application
   layer. Health probes must be a TCP connect or must carry a client certificate.
@@ -43,7 +54,9 @@ Each of these looks like a mistake and is not. Verify before "fixing".
   fake vault's call log, not merely the status code. A broker that reads a
   secret and then declines to return it has already defeated its own purpose.
 - **Every request is audited, refusals and unexpected errors included.**
-  `run()` has a blanket `except Exception` for exactly this reason.
+  `run()` has a blanket `except Exception` for exactly this reason, and a
+  `RequestValidationError` handler covers requests that never reach a handler
+  at all — body validation runs before the identifying dependency.
 - **Identity comes from the peer certificate and nowhere else.** No
   header-based fallback, no "trusted proxy" mode. Adding one would undo the
   design decision rather than extend it.

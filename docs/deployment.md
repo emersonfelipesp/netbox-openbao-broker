@@ -160,8 +160,23 @@ Entries worth alerting on:
   for legitimate use, or something is probing.
 - `outcome=denied` with `reason=instance not configured` — a certificate from
   the trusted CA naming an unknown instance. Check whether the CA issued it.
-- `outcome=denied` with `reason=invalid path: …` — path traversal, refused
-  before OpenBao was contacted.
+- `outcome=denied` with `reason=invalid path: …` — traversal or an encoded
+  path, refused before OpenBao was contacted.
+- `operation=malformed` — a request that failed validation before it reached a
+  handler. Ordinarily a client bug; in volume, someone mapping the API.
+
+## Secret paths
+
+Printable ASCII, no spaces, no percent-encoding, no `..` or `.` segments, no
+leading slash. `netbox-openbao` generates `<prefix>/<uuid>`, which satisfies all
+of it; the restriction only bites if you hand-write a prefix.
+
+The percent-encoding rule is worth understanding before relaxing it. `requests`
+decodes `%2e` to `.` while building the URL, so an encoded traversal passes a
+literal `..` check and then reappears in the request. OpenBao 2.6.0 refuses to
+resolve it — but that puts the boundary in the server's routing rather than in
+the broker, where a proxy or a version bump removes it without anything failing
+visibly.
 
 ## Upgrading
 

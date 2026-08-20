@@ -21,6 +21,8 @@ import logging
 import uuid
 
 from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from .audit import AuditLog
@@ -84,6 +86,42 @@ def create_app(config: BrokerConfig, vault: VaultClient | None = None, audit: Au
     )
     vault = vault or VaultClient(config)
     audit = audit or AuditLog()
+
+    @app.exception_handler(RequestValidationError)
+    async def malformed_request(request: Request, exc: RequestValidationError):
+        """
+        Audit a request that never reached a handler.
+
+        Body validation runs before the dependency that identifies the caller,
+        so without this a malformed request to a secret route produces a 422 and
+        no audit record at all — and an attempt to read a secret is exactly the
+        thing an operator reconstructing an incident wants to find, whether or
+        not it parsed.
+
+        The response is deliberately generic. FastAPI's default 422 echoes the
+        offending input, which for `/v1/secret/write` is the material itself;
+        the caller sent it, so this is not a disclosure, but it puts secret data
+        into a response body and from there into whatever logs it. The same
+        reasoning keeps `input` and `msg` out of the local log below — the
+        field locations say where the request was wrong without repeating what
+        was in it.
+        """
+        try:
+            name = identity_from_scope(request.scope)
+        except IdentityError:
+            name = None
+
+        locations = [
+            ' -> '.join(str(part) for part in error.get('loc', ()))
+            for error in exc.errors()
+        ]
+        logger.info('Rejected a malformed request: %s', '; '.join(locations) or 'unparseable')
+
+        audit.record(
+            instance=name, operation='malformed', path=None, outcome='denied',
+            reason='request failed validation', request_id=str(uuid.uuid4()),
+        )
+        return JSONResponse(status_code=422, content={'detail': 'Invalid request.'})
 
     def caller(request: Request) -> Caller:
         request_id = str(uuid.uuid4())

@@ -291,3 +291,48 @@ class TestRealHandshake:
         with _client(live, 'known') as client:
             assert client.get('/docs').status_code == 404
             assert client.get('/openapi.json').status_code == 404
+
+
+class TestIdentityAcrossConnections:
+    """
+    Where a subtle bug in `broker.tls_scope` would actually hide.
+
+    The peer certificate is captured once per connection and attached to every
+    scope built on it. That is correct only if the association really is
+    per-connection: if the certificate were ever captured per-process, or a
+    scope shared between connections, one client would inherit another's
+    authorization. Nothing in the single-request tests above would notice,
+    because each of them opens a fresh connection and makes one request.
+    """
+
+    def test_keep_alive_does_not_lose_the_identity(self, live):
+        """
+        Several requests down one connection. The first builds the scope; the
+        rest reuse the protocol instance, and each must still resolve to the
+        same verified certificate rather than to nothing.
+        """
+        with _client(live, 'known') as client:
+            for _ in range(5):
+                response = client.post(
+                    '/v1/secret/read', json={'path': 'netbox/credentials/abc'})
+                assert response.status_code == 200, response.text
+
+    def test_two_clients_interleaved_do_not_cross_over(self, live):
+        """
+        A configured instance and a stranger, alternating against the same
+        server. If identity leaked between connections, the stranger would be
+        served — which is the whole breach in one request.
+        """
+        before = len(_vault_calls(live))
+
+        with _client(live, 'known') as good, _client(live, 'stranger') as bad:
+            for _ in range(4):
+                assert good.post(
+                    '/v1/secret/read', json={'path': 'netbox/credentials/abc'},
+                ).status_code == 200
+                assert bad.post(
+                    '/v1/secret/read', json={'path': 'netbox/credentials/abc'},
+                ).status_code == 403
+
+        # Four permitted reads and not one from the stranger.
+        assert len(_vault_calls(live)) == before + 4

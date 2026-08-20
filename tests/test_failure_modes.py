@@ -190,3 +190,80 @@ class TestMalformedPeerCertificate:
     def test_it_raises_identity_error_and_nothing_else(self, peer_cert):
         with pytest.raises(IdentityError):
             common_name_from_peer_cert(peer_cert)
+
+
+class TestMalformedRequestsAreAudited:
+    """
+    Body validation runs before the dependency that identifies the caller, so a
+    malformed request to a secret route used to produce a 422 and no audit
+    record. An attempt to read a secret is exactly what an operator
+    reconstructing an incident wants to find, whether or not it parsed.
+    """
+
+    def _client(self, records):
+        class Recording(AuditLog):
+            def __init__(self):
+                pass
+
+            def record(self, **kwargs):
+                records.append(kwargs)
+
+        class UnusedVault:
+            def read(self, path, version=None):
+                raise AssertionError('a malformed request must never reach OpenBao')
+
+            def write(self, path, data, cas=None):
+                raise AssertionError('a malformed request must never reach OpenBao')
+
+            def health(self):
+                return {'reachable': True, 'sealed': False}
+
+        app = create_app(config(), vault=UnusedVault(), audit=Recording())
+
+        import broker.app as app_module
+        original = app_module.identity_from_scope
+        app_module.identity_from_scope = lambda scope: 'netbox-prod'
+        client = TestClient(app, raise_server_exceptions=False)
+        client._restore = lambda: setattr(app_module, 'identity_from_scope', original)
+        return client
+
+    @pytest.mark.parametrize('body', [
+        {},                                              # no path at all
+        {'path': 123},                                   # wrong type
+        {'path': 'netbox/credentials/a', 'version': 0},  # ge=1
+        {'path': 'x' * 501},                             # max_length
+    ])
+    def test_a_malformed_body_still_leaves_a_record(self, body):
+        records = []
+        client = self._client(records)
+        try:
+            response = client.post('/v1/secret/read', json=body)
+        finally:
+            client._restore()
+
+        assert response.status_code == 422
+        assert records, 'a malformed request left no audit record'
+        assert records[-1]['operation'] == 'malformed'
+        assert records[-1]['outcome'] == 'denied'
+        assert records[-1]['instance'] == 'netbox-prod'
+
+    def test_the_response_does_not_echo_the_material_back(self):
+        """
+        FastAPI's default 422 includes the offending input, which for a write is
+        the secret itself. The caller sent it, so echoing is not a disclosure —
+        but it puts material in a response body, and from there into whatever
+        logs it.
+        """
+        records = []
+        client = self._client(records)
+        try:
+            response = client.post(
+                '/v1/secret/write',
+                json={'path': 'netbox/credentials/a', 'data': {'password': 'hunter2'}, 'cas': -1},
+            )
+        finally:
+            client._restore()
+
+        assert response.status_code == 422
+        assert 'hunter2' not in response.text
+        assert response.json() == {'detail': 'Invalid request.'}
