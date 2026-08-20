@@ -247,6 +247,35 @@ class TestMalformedRequestsAreAudited:
         assert records[-1]['outcome'] == 'denied'
         assert records[-1]['instance'] == 'netbox-prod'
 
+    @pytest.mark.parametrize('raw', [
+        b'{not json at all',   # never parses
+        b'',                   # no body
+        b'[1, 2, 3]',          # valid JSON, wrong shape
+        b'"just-a-string"',
+    ])
+    def test_a_body_that_never_parses_still_leaves_a_record(self, raw):
+        """
+        The handler covers `RequestValidationError`, and FastAPI raises that for
+        a body it could not decode as well as for one it decoded and rejected.
+        Worth pinning: if those ever became different exception types, the
+        unparseable half would go back to being invisible.
+        """
+        records = []
+        client = self._client(records)
+        try:
+            response = client.post(
+                '/v1/secret/read', content=raw,
+                headers={'content-type': 'application/json'},
+            )
+        finally:
+            client._restore()
+
+        assert response.status_code == 422
+        assert records, 'a malformed request left no audit record'
+        assert records[-1]['operation'] == 'malformed'
+        assert records[-1]['outcome'] == 'denied'
+        assert records[-1]['instance'] == 'netbox-prod'
+
     def test_the_response_does_not_echo_the_material_back(self):
         """
         FastAPI's default 422 includes the offending input, which for a write is
