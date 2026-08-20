@@ -1,0 +1,68 @@
+# The broker, as it is meant to run: unprivileged, read-only, holding the
+# AppRole that NetBox deliberately does not have.
+#
+# Nothing secret appears in this file. The SecretID arrives as a Docker secret,
+# which lands as a file under /run/secrets and is named to the broker through
+# the `_FILE` indirection — so it never enters the process environment, where
+# /proc/<pid>/environ would expose it to anything running as the same user.
+#
+#   printf '%s' "$ROLE_ID"   | docker secret create broker_role_id -
+#   printf '%s' "$SECRET_ID" | docker secret create broker_secret_id -
+#
+# With plain `docker compose` (no swarm), replace the `secrets:` block with
+# read-only bind mounts of two files with 0400 permissions.
+
+services:
+  broker:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    image: netbox-openbao-broker:0.1.0
+    restart: unless-stopped
+
+    # Only NetBox needs to reach this. Publishing it on 0.0.0.0 makes the
+    # client CA the only thing between the internet and a vault read — true,
+    # but not something to rest on when it does not have to be.
+    ports:
+      - "127.0.0.1:8201:8201"
+
+    environment:
+      BROKER_CONFIG: /etc/netbox-openbao-broker/config.toml
+      BROKER_TLS_CERT: /etc/netbox-openbao-broker/tls/server.pem
+      BROKER_TLS_KEY: /etc/netbox-openbao-broker/tls/server.key
+      BROKER_TLS_CLIENT_CA: /etc/netbox-openbao-broker/tls/client-ca.pem
+      BROKER_BAO_ROLE_ID_FILE: /run/secrets/broker_role_id
+      BROKER_BAO_SECRET_ID_FILE: /run/secrets/broker_secret_id
+      BROKER_LOG_LEVEL: INFO
+
+    secrets:
+      - broker_role_id
+      - broker_secret_id
+
+    volumes:
+      - ./config.toml:/etc/netbox-openbao-broker/config.toml:ro
+      - ./tls:/etc/netbox-openbao-broker/tls:ro
+
+    # The broker writes nothing but its audit stream, which goes to stdout.
+    read_only: true
+    tmpfs:
+      - /tmp:size=8m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+
+    # Audit records are the point; losing them to rotation is not acceptable.
+    # Ship them onward with a real driver in production — this only bounds the
+    # damage of the default.
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "10"
+
+secrets:
+  broker_role_id:
+    external: true
+  broker_secret_id:
+    external: true
