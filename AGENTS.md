@@ -73,6 +73,64 @@ because the plugin's `BrokerBackend` is a transport swap and nothing more. Any
 divergence in semantics shows up as behaviour that differs depending on whether
 broker mode is switched on. If the ABC changes, this changes with it.
 
+**`may_delete` is a two-sided trade, and the documentation must state both
+sides.** It was wrong in one direction (recommending `false` for production
+without saying it orphans material), and correcting it invited being wrong in
+the other (recommending `true` without saying what it hands a compromised
+NetBox). Verify any change to this text against `netbox-openbao/services.py`
+rather than against the previous paragraph:
+
+Every claim below describes what happens when the delete is **refused** — by
+`may_delete = false`, or equivalently by an OpenBao policy that withholds the
+capability. With `true`, the delete proceeds and none of this arises.
+
+- **Deleting a credential** runs `delete_material` from a `post_delete` signal
+  deferred to `transaction.on_commit`. The signal handler swallows the failure,
+  because the row is already gone and raising could not undo it. This is the
+  only path that leaves material behind **silently**.
+- **A rolled-back write** compensates in `store_credential`'s `except` block and
+  then **re-raises the original exception**. The caller's operation fails. Do
+  not describe this one as silent.
+- **`discard_staged`** also deletes, and **re-raises**. It leaves nothing behind.
+- **`true` makes a NetBox compromise destructive.** A version-less delete maps to
+  `delete_metadata_and_all_versions`, which is permanent — every credential under
+  the instance's prefix. Reading was already reachable; destroying was not.
+
+**Do not write that the residue cannot be found — and do not write that finding
+it is free.** Both errors were made in successive revisions of this file.
+
+It *is* identifiable: every credential carries KV v2 `custom_metadata` with
+`managed_by: netbox-openbao` and its NetBox UUID, so an entry matching no
+`Credential` row can be picked out by listing the prefix and reading metadata,
+without reading a single secret value. Say "no automatic reconciler", never
+"unrecoverable".
+
+But **the broker cannot run that listing.** It has six endpoints and none of them
+lists a mount, and the AppRole is deliberately unreachable outside the process —
+that is the whole design. Reconciliation needs a *separate* read-only identity
+talking to OpenBao directly, which `docs/deployment.md` now provisions. Any
+future text recommending `may_delete = false` must carry that cost with it;
+recommending it while implying the baseline deployment can already reconcile is
+the same class of error as claiming the residue is unfindable.
+
+The denied-delete audit record is **an informational correlation event, not an
+alert**. On a `may_delete = false` instance it is an ordinary consequence of
+normal cleanup, so paging on it produces noise that gets muted — taking the
+interesting cases with it. It is emitted for all three plugin paths above and for
+any direct call by a certificate holder, and the broker cannot distinguish them.
+Alert on the plugin's `ORPHANED SECRET` line and on a non-empty reconciliation
+result; those name something actionable.
+
+**Every instance block is a separate client identity.** The broker selects by
+subject CN, so a read-only consumer needs its own certificate. A documentation
+example that adds a read-only instance without saying so describes a protection
+that does not exist.
+
+Keep the `may_delete` values in the README, `deploy/config.toml.example`, and
+the OpenBao policy in `docs/deployment.md` aligned — refusing delete at either
+limit produces the same residue, with the added confusion of configuration that
+says otherwise.
+
 ## Development
 
 ```bash

@@ -45,6 +45,23 @@ The subject **CN of the client certificate is the instance identity**. Issuing
 two certificates with the same CN gives two hosts the same authorization, which
 may be what you want for a NetBox cluster and is a mistake otherwise.
 
+It follows that **every instance block needs its own certificate**. A read-only
+consumer configured as a separate instance is only read-only if it presents its
+own identity:
+
+```bash
+openssl req -newkey rsa:4096 -nodes -keyout reporting.key -out reporting.csr \
+  -subj '/CN=reporting'
+openssl x509 -req -in reporting.csr -CA client-ca.pem -CAkey client-ca.key \
+  -CAcreateserial -days 825 -out reporting.pem \
+  -extfile <(printf 'extendedKeyUsage=clientAuth\nbasicConstraints=CA:FALSE\n')
+```
+
+Hand that consumer `reporting.pem` and `reporting.key`. If it presents
+`netbox-prod.pem` instead, the broker selects the `netbox-prod` instance — write
+and delete permissions included — and the read-only block in `config.toml`
+protects nothing at all.
+
 ## 2. Configure OpenBao
 
 Create a policy scoped to exactly the prefixes the instance will declare, and an
@@ -52,14 +69,113 @@ AppRole bound to it. The broker's AppRole should be able to reach nothing the
 policy in `config.toml` does not also permit — two independent limits, so a
 mistake in either one is not sufficient on its own.
 
+For an instance with `may_delete = false`, which is the recommended default:
+
 ```hcl
 path "secret/data/netbox/credentials/*"     { capabilities = ["create", "read", "update"] }
-path "secret/metadata/netbox/credentials/*" { capabilities = ["read", "update", "list"] }
+path "secret/metadata/netbox/credentials/*" { capabilities = ["create", "read", "update", "list"] }
 ```
 
-Note that `delete` is absent above. Grant it only if an instance sets
-`may_delete = true`, and prefer leaving destruction to a human with a different
-credential.
+`create` on the metadata path is there deliberately even though the plugin has
+not needed it. `store_credential` writes the data path first, which creates the
+metadata entry implicitly, so the `update_metadata` call that follows has always
+found an existing path and `update` alone has sufficed. That is an ordering
+dependency, not a guarantee — grant `create` so the policy does not silently
+depend on which of two writes happens first.
+
+Add these two only for an instance you have deliberately given
+`may_delete = true`:
+
+```hcl
+path "secret/metadata/netbox/credentials/*" { capabilities = ["create", "read", "update", "list", "delete"] }
+path "secret/delete/netbox/credentials/*"   { capabilities = ["update"] }
+```
+
+### An identity for reconciliation
+
+`list` above lets the **broker's** AppRole enumerate the prefix. That is not the
+same as letting *you* enumerate it, and the difference matters: the broker
+exposes six endpoints and none of them lists a mount, so its AppRole cannot be
+driven to walk the prefix from outside. The SecretID is deliberately unreachable
+outside the broker process, which is the entire point of this service.
+
+So the reconciliation procedure the [README describes](../README.md#choosing-may_delete-and-what-it-costs-either-way)
+needs **its own identity**, talking to OpenBao directly rather than through the
+broker. Give it read and list on metadata and nothing else — it never needs to
+read a secret value, only the `custom_metadata` that names which NetBox
+credential each path belongs to:
+
+```hcl
+# Policy: netbox-openbao-reconcile
+path "secret/metadata/netbox/credentials"   { capabilities = ["list"] }
+path "secret/metadata/netbox/credentials/*" { capabilities = ["read", "list"] }
+```
+
+Note the two paths. KV v2 lists the *directory*, so the un-suffixed path is what
+`list` operates on; the wildcard is what reads each entry's metadata.
+
+Bind that policy to whatever identity your operators already use — it does not
+need an AppRole of its own, and giving it one creates another long-lived
+credential to manage. Then:
+
+```bash
+# Every path the plugin manages under this prefix.
+bao kv metadata list -mount=secret netbox/credentials
+
+# For each, the metadata that says which NetBox credential it belongs to.
+bao kv metadata get -mount=secret -format=json netbox/credentials/<uuid> \
+  | jq '.data.custom_metadata'
+```
+
+An entry whose `managed_by` is `netbox-openbao` and whose
+`netbox_credential_uuid` matches no `Credential` row in NetBox is residue. Report
+it; do not script its deletion. Material NetBox cannot account for is exactly
+the thing a human should authorise removing — the row may be missing because of
+a restore, a partial migration, or a bug in the plugin.
+
+This is a manual procedure today. The plugin tracks automating it, and until that
+lands, "run this periodically" is the honest instruction rather than an implied
+background job.
+
+The two extra capabilities are separate because the KV v2 API splits them across
+separate paths, and they are **not** the same operation:
+
+| Capability | Operation | Reversible? |
+|---|---|---|
+| `update` on `secret/delete/…` | Soft-delete specific versions | Yes — undelete restores them |
+| `delete` on `secret/metadata/…` | Destroy the path, every version, and its metadata | **No** |
+
+> **Granting delete makes a NetBox compromise destructive.**
+>
+> An attacker with code execution in NetBox can already ask the broker to read
+> anything the instance is authorized to read; that limit is inherent to the
+> design. Granting the metadata-delete capability adds the ability to
+> **permanently erase every credential under the instance's prefix**, and KV v2
+> does not undo it.
+>
+> Bound it: keep each instance's `path_prefixes` as narrow as the deployment
+> allows, so what a compromise can destroy is limited by the prefix rather than
+> by the mount, and keep OpenBao's audit device and your backups outside
+> NetBox's reach.
+
+Withholding them is not free either, which is why the README discusses the trade
+rather than asserting an answer. Without delete, removing a credential in NetBox
+leaves its material on the mount: the destroy runs from a `post_delete` signal
+deferred to `transaction.on_commit`, where the row is already gone and raising
+could not undo it, so the plugin logs `ORPHANED SECRET` and continues. That
+residue is enumerable — every credential carries `managed_by: netbox-openbao`
+metadata and the `list` capability above is what lets you walk the mount — but no
+job reconciles it for you today.
+
+The default recommendation is `may_delete = false` with that procedure run
+periodically, because an enumerable residue is a smaller problem than an
+irreversible deletion. See
+[Choosing `may_delete`](../README.md#choosing-may_delete-and-what-it-costs-either-way)
+for the full comparison.
+
+**Keep the two limits aligned.** Refusing delete at the OpenBao policy while
+permitting it at `may_delete` produces exactly the same residue as refusing it at
+both, with the added confusion of a configuration that says otherwise.
 
 ## 3. Configure the broker
 

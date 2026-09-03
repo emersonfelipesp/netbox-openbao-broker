@@ -19,6 +19,28 @@ tls_verify = true
 # certificate that is cryptographically valid but names no configured instance
 # is refused — one mis-issued certificate must not be full vault access.
 
+# `may_delete` is a real trade, not a free least-privilege win. Read the README
+# section "Choosing may_delete" before changing these.
+#
+# false (recommended): deleting a credential in NetBox leaves its material on
+#   the mount, because the plugin destroys it from a post-commit signal that
+#   cannot report failure. The residue is identifiable — every credential carries
+#   managed_by: netbox-openbao metadata naming its NetBox UUID — but the broker
+#   cannot list a mount, so finding it needs a SEPARATE read-only OpenBao
+#   identity and a scheduled run. See "An identity for reconciliation" in
+#   docs/deployment.md. Choosing false without provisioning that identity leaves
+#   residue you have no way to find.
+#
+# true: a NetBox compromise gains the ability to permanently erase every
+#   credential under the instance's prefix. KV v2 metadata deletion does not
+#   undo. Choose it when automatic cleanup is worth that, and keep the prefix
+#   narrow so the blast radius is bounded by the prefix rather than the mount.
+#
+# Each block below is a SEPARATE CLIENT IDENTITY. The broker selects an instance
+# by the subject CN of the client certificate, so the read-only consumer at the
+# bottom needs its own certificate with CN=reporting. Presenting netbox-prod's
+# certificate selects netbox-prod, delete permissions included.
+
 [instances.netbox-prod]
 path_prefixes = ["netbox/credentials"]
 may_write = true
@@ -28,3 +50,10 @@ may_delete = false
 path_prefixes = ["netbox-staging/credentials"]
 may_write = true
 may_delete = true
+
+# A read-only consumer: reporting, automation, anything that resolves
+# credentials but never manages their lifecycle.
+[instances.reporting]
+path_prefixes = ["netbox/credentials"]
+may_write = false
+may_delete = false

@@ -117,12 +117,17 @@ tls_verify = true
 [instances.netbox-prod]
 path_prefixes = ["netbox/credentials"]
 may_write = true
-may_delete = false
+may_delete = false        # see "Choosing may_delete" below — this has a cost
 
 [instances.netbox-staging]
 path_prefixes = ["netbox-staging/credentials"]
 may_write = true
 may_delete = true
+
+[instances.reporting]
+path_prefixes = ["netbox/credentials"]
+may_write = false
+may_delete = false
 ```
 
 The instance key is matched against the client certificate's subject CN. An
@@ -131,6 +136,81 @@ permitted to read everything.
 
 `may_write` also gates metadata writes. Metadata is not material, but it is
 still a mutation of the vault by a caller the operator declared read-only.
+
+### Choosing `may_delete`, and what it costs either way
+
+Both settings cost something. Neither is the free least-privilege win it looks
+like, and the examples above previously showed `false` for production with no
+explanation at all — which is how an operator ends up with residue they were
+never told to expect.
+
+**With `false`, deleting a credential leaves its material behind.** The plugin
+calls delete on three paths that are not operator-initiated destruction, and
+only one of them can be refused quietly:
+
+| When the plugin deletes | Refused under `may_delete = false` |
+|---|---|
+| A credential is deleted in NetBox | **Leaves material behind, silently.** The destroy runs from a `post_delete` signal deferred to `transaction.on_commit`, so by the time it runs the row is gone and raising could not undo it. The plugin logs `ORPHANED SECRET` and continues. |
+| A credential write is rolled back | **Leaves material behind, but fails loudly.** The write happens inside a database transaction and the plugin compensates by deleting what it wrote when that transaction unwinds. A refused compensation is logged and the original failure re-raised, so the operation does fail — just not for this reason. |
+| A staged rotation is discarded | **Fails loudly, leaves nothing behind.** `discard_staged` re-raises; the staged version stays and the credential still points at it. |
+
+The residue is **findable, but not through the broker and not automatically.**
+Both halves of that matter:
+
+- Every credential the plugin writes carries KV v2 `custom_metadata` with
+  `managed_by: netbox-openbao` and the NetBox credential's UUID, so an entry that
+  matches no `Credential` row is identifiable by listing the prefix and reading
+  metadata. No secret value need be read to do it.
+- **The broker cannot run that listing.** It exposes six endpoints and none of
+  them lists a mount, and its AppRole is deliberately unreachable from outside
+  the process. Reconciliation therefore needs a separate, read-only identity
+  talking to OpenBao directly — see
+  [An identity for reconciliation](docs/deployment.md#an-identity-for-reconciliation)
+  for the policy and the procedure. Choosing `may_delete = false` without
+  provisioning that identity leaves you with residue you have no way to find.
+- **Nothing runs it for you.** `CredentialVerifyJob` iterates existing credential
+  rows and asks whether each one's material is present, which makes it
+  structurally blind to material whose row is gone. The plugin tracks automating
+  the other direction; until then this is a procedure someone schedules.
+
+So: recoverable, at the cost of one more identity and a periodic job someone
+writes. That is a real cost and it is smaller than an irreversible deletion — but
+it is not zero, and a deployment that skips it has chosen the worst of both.
+
+**With `true`, a NetBox compromise becomes destructive.** An attacker with code
+execution in NetBox can already ask the broker to read anything the instance is
+authorized to read — that limit is inherent to the design and stated at the top
+of this file. Granting delete adds the ability to *destroy*: a version-less
+delete maps to `delete_metadata_and_all_versions`, which is permanent. Every
+credential under the instance's prefix can be erased, and KV v2 does not undo it.
+
+The two capabilities are not the same shape, which matters when writing the
+OpenBao policy. Removing specific versions (`secret/delete/…`) is a soft delete
+that can be undeleted. Removing a path's metadata (`secret/metadata/…`) destroys
+every version irreversibly. The plugin uses both.
+
+**So: `false` is the right default**, and the examples above keep it — provided
+you provision the reconciliation identity alongside it. A recoverable,
+enumerable residue is a smaller problem than an irreversible one, and refusing
+delete does not stop NetBox working; it only removes the automatic cleanup after
+a credential is deleted. What it asks of you in exchange is one read-only OpenBao
+identity and a scheduled run of the listing procedure.
+
+Choose `true` deliberately, when automatic cleanup is worth the destruction
+capability — a lower-tier instance, a short prefix, an estate where an
+unreconciled secret is the greater operational risk. If you do, bound it: keep
+the instance's `path_prefixes` as narrow as possible, so what a compromise can
+destroy is limited by the prefix rather than by the mount, and keep OpenBao's
+audit device and your backups outside NetBox's reach.
+
+For an instance that genuinely never deletes — a reporting or automation
+consumer that only resolves credentials — `false` costs nothing at all, because
+none of the three rows above ever runs. The `reporting` instance above is that
+case, and note that it is **a separate client identity, not a second block for
+the same one**: the broker selects an instance by the subject CN of the client
+certificate, so a reporting consumer needs its own CA-signed certificate with
+`CN=reporting`. Presenting `netbox-prod`'s certificate selects `netbox-prod`,
+write and delete permissions included, and the read-only block protects nothing.
 
 ### Environment
 
@@ -175,6 +255,35 @@ that never reached a handler: body validation runs before the caller is
 identified, so a malformed request is audited as `operation=malformed` rather
 than disappearing into a 422. An attempt to read a secret is what an operator
 reconstructing an incident wants to find, whether or not it parsed.
+
+### The denied-delete record, and what not to do with it
+
+```
+operation=delete  outcome=denied  reason="instance may not delete"
+```
+
+**Do not page on this.** On a `may_delete = false` instance it is an ordinary
+consequence of normal plugin cleanup, so an alert on it fires routinely, gets
+muted, and takes the genuinely interesting cases with it when it goes.
+
+Four things produce it, and the broker cannot tell them apart — it sees a
+refused request, not the intent behind it:
+
+1. A credential deletion in NetBox — leaves residue, silently.
+2. A rolled-back credential write — leaves residue, and the caller's operation
+   fails anyway with the original error.
+3. A discarded staged rotation — fails loudly and leaves nothing behind.
+4. Anything else holding that client certificate, calling `/v1/secret/delete`
+   directly.
+
+Keep it as an **informational correlation event**: the record that tells you
+*when* something tried to clean up and could not, useful when you are already
+investigating. Route it to the log store, not to a pager.
+
+What is worth alerting on is the plugin's own `ORPHANED SECRET` line, which names
+an actual path that was left behind, and the output of the reconciliation run —
+a non-empty result means residue exists right now. Those two are actionable; this
+one is context.
 
 ## Running it
 
