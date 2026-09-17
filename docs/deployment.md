@@ -1,7 +1,7 @@
 # Deploying the broker
 
-One page, deliberately. The service has six endpoints, no database, and no user
-model; a deployment guide that sprawls is a sign the service has.
+One page, deliberately. The service has a fixed secret surface, an opt-in closed
+administration transport, no database, and no user model.
 
 Read [the threat model in the README](../README.md#what-this-buys-stated-honestly)
 first. If you are deploying this expecting that a NetBox compromise can no
@@ -94,10 +94,11 @@ path "secret/delete/netbox/credentials/*"   { capabilities = ["update"] }
 ### An identity for reconciliation
 
 `list` above lets the **broker's** AppRole enumerate the prefix. That is not the
-same as letting *you* enumerate it, and the difference matters: the broker
-exposes six endpoints and none of them lists a mount, so its AppRole cannot be
-driven to walk the prefix from outside. The SecretID is deliberately unreachable
-outside the broker process, which is the entire point of this service.
+same as letting *you* enumerate it. The baseline secret surface cannot list a
+mount. An instance explicitly granted the `mounted-secrets` administration
+family can use only operations advertised by both the broker contract and the
+live OpenBao OpenAPI document. The SecretID remains unreachable outside the
+broker process.
 
 So the reconciliation procedure the [README describes](../README.md#choosing-may_delete-and-what-it-costs-either-way)
 needs **its own identity**, talking to OpenBao directly rather than through the
@@ -186,6 +187,22 @@ An instance declaring no `path_prefixes` is a startup error rather than an
 instance permitted to read everything, and the broker refuses to start with no
 instances at all — it would otherwise accept connections and refuse every
 request, which reads as a bug in the caller.
+
+Administration is disabled unless an instance declares
+`administration_families`. The accepted values are `access`, `authentication`,
+`cluster`, `finalization`, `mounted-secrets`, and `secret-engines`. Treat this as
+an instance-level ceiling. NetBox still enforces user and object permissions;
+the broker does not receive or reproduce them. The OpenBao policy for the
+broker's AppRole must independently grant only the system and mount paths needed
+by the selected families.
+
+The `cluster` family includes initialization, seal lifecycle, Raft membership,
+and bounded snapshot download and restore. Snapshot restore can replace Raft
+state and must be granted only to an administrative instance. The broker accepts
+only `application/octet-stream`, requires an exact `Content-Length` no larger
+than 512 MiB, spools the inbound stream with a bounded total, and makes one
+OpenBao mutation attempt. A transport failure has an unknown outcome and must
+not be retried automatically.
 
 ## 4. Run it
 

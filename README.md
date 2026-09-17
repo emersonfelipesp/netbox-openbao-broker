@@ -45,15 +45,19 @@ Two further limits are worth naming explicitly:
   prefix and nothing above it. Separate what genuinely must not fall together
   into separate prefixes with separate instances, or it will not be separate.
 
-## Scope: deliberately small
+## Scope: deliberately bounded
 
-Six endpoints mirroring `netbox-openbao`'s `SecretBackend` ABC exactly, plus
-health. No user model. No RBAC. No database. One authorization rule: does this
-client certificate's identity permit this path?
+The six secret endpoints mirror `netbox-openbao`'s `SecretBackend` ABC exactly.
+The optional administration surface consists of one contract-discovery route,
+one versioned typed request envelope, and two bounded Raft snapshot streaming
+routes. There is no user model, RBAC implementation, or database. NetBox remains
+the authority for user and object permissions; the broker grants only
+instance-level path prefixes and administration families.
 
-That smallness is a design constraint, not an unfinished state — a broker with a
-rich API is just NetBox again, with a second authorization model to drift out of
-step with the first.
+The broker owns a closed operation registry. It never accepts an arbitrary
+OpenBao system path. Mounted secret operations must match the live OpenBao
+OpenAPI path template, method, operation ID, query fields, and body fields before
+the target request is sent. A refused request never reaches its target endpoint.
 
 | Endpoint | Body | Returns |
 |---|---|---|
@@ -63,7 +67,36 @@ step with the first.
 | `POST /v1/secret/versions` | `path` | `{"versions": [...]}` |
 | `POST /v1/secret/metadata/read` | `path` | `{"metadata": {...}}` |
 | `POST /v1/secret/metadata/write` | `path`, `custom_metadata` | `{"updated": true}` |
+| `GET /v1/administration/contract` | — | Enabled contract version, digest, families, and operations |
+| `POST /v1/administration/request` | Contract digest, operation, and typed arguments | `{"data": {...}}` |
+| `GET /v1/administration/snapshot` | Contract digest header | Bounded Raft snapshot stream |
+| `POST /v1/administration/snapshot` | Contract digest header and raw snapshot body | `{"restored": true}` |
 | `GET /healthz` | — | `{"ok": true, "openbao": {...}}` |
+
+Administration is disabled by default. Enable only the families an instance
+needs:
+
+```toml
+[instances.netbox-prod]
+path_prefixes = ["netbox/credentials"]
+may_write = true
+may_delete = false
+administration_families = [
+  "access",
+  "authentication",
+  "cluster",
+  "finalization",
+  "mounted-secrets",
+  "secret-engines",
+]
+```
+
+The families are an instance boundary, not a replacement for NetBox permissions.
+The broker authenticates the NetBox instance through mTLS and records only
+non-secret operation metadata. The caller must first discover the contract and
+send its exact digest with every administration request; stale clients fail
+closed. Snapshot restores are single-attempt mutations whose uncertain transport
+outcome is returned as `X-OpenBao-Outcome: unknown`.
 
 Paths are restricted to printable ASCII with no spaces and **no
 percent-encoding**. That last one is not fussiness: `requests`, which `hvac`
@@ -161,10 +194,10 @@ Both halves of that matter:
   `managed_by: netbox-openbao` and the NetBox credential's UUID, so an entry that
   matches no `Credential` row is identifiable by listing the prefix and reading
   metadata. No secret value need be read to do it.
-- **The broker cannot run that listing.** It exposes six endpoints and none of
-  them lists a mount, and its AppRole is deliberately unreachable from outside
-  the process. Reconciliation therefore needs a separate, read-only identity
-  talking to OpenBao directly — see
+- **The baseline secret surface cannot run that listing.** An instance with the
+  optional administration families may be able to enumerate mounts through the
+  reviewed administration contract. A secret-only deployment still needs a
+  separate, read-only identity talking to OpenBao directly — see
   [An identity for reconciliation](docs/deployment.md#an-identity-for-reconciliation)
   for the policy and the procedure. Choosing `may_delete = false` without
   provisioning that identity leaves you with residue you have no way to find.

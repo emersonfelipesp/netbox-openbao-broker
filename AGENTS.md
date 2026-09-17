@@ -5,10 +5,11 @@ constrains what may be claimed anywhere else in this repository.
 
 ## The one rule
 
-**Keep it small.** Six endpoints plus health, no database, no user model, one
-authorization rule. A broker with a rich API is just NetBox again, with a second
-authorization model to drift out of step with the first. Adding a capability
-here needs a reason that survives that sentence.
+**Keep it bounded.** The secret endpoints, health route, one versioned
+administration envelope, and bounded snapshot routes are the complete surface.
+There is no database or user model. A broker with an open-ended proxy is just
+NetBox again, with a second authorization model to drift out of step with the
+first. Adding a capability here needs a reason that survives that sentence.
 
 ## Traps that have already cost time
 
@@ -105,13 +106,11 @@ It *is* identifiable: every credential carries KV v2 `custom_metadata` with
 without reading a single secret value. Say "no automatic reconciler", never
 "unrecoverable".
 
-But **the broker cannot run that listing.** It has six endpoints and none of them
-lists a mount, and the AppRole is deliberately unreachable outside the process —
-that is the whole design. Reconciliation needs a *separate* read-only identity
-talking to OpenBao directly, which `docs/deployment.md` now provisions. Any
-future text recommending `may_delete = false` must carry that cost with it;
-recommending it while implying the baseline deployment can already reconcile is
-the same class of error as claiming the residue is unfindable.
+The baseline secret surface cannot run that listing. An instance explicitly
+granted administration families may enumerate only through the reviewed closed
+contract. A secret-only deployment needs a *separate* read-only identity talking
+to OpenBao directly, which `docs/deployment.md` provisions. Any future text
+recommending `may_delete = false` must distinguish those deployment modes.
 
 The denied-delete audit record is **an informational correlation event, not an
 alert**. On a `may_delete = false` instance it is an ordinary consequence of

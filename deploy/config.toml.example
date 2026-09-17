@@ -45,6 +45,9 @@ tls_verify = true
 path_prefixes = ["netbox/credentials"]
 may_write = true
 may_delete = false
+# Administration is disabled when this list is absent or empty. Enable only the
+# reviewed families this specific NetBox instance needs.
+# administration_families = ["access", "authentication", "cluster", "finalization", "mounted-secrets", "secret-engines"]
 
 [instances.netbox-staging]
 path_prefixes = ["netbox-staging/credentials"]

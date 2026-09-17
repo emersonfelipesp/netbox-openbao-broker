@@ -20,9 +20,11 @@ import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 
-__all__ = ('BrokerConfig', 'InstancePolicy', 'load_config')
+from .administration import ADMINISTRATION_FAMILIES
 
-DEFAULT_CONFIG_PATH = '/etc/netbox-openbao-broker/config.toml'
+__all__ = ("BrokerConfig", "InstancePolicy", "load_config")
+
+DEFAULT_CONFIG_PATH = "/etc/netbox-openbao-broker/config.toml"
 
 
 class ConfigError(Exception):
@@ -46,6 +48,7 @@ class InstancePolicy:
     path_prefixes: tuple[str, ...]
     may_write: bool = False
     may_delete: bool = False
+    administration_families: tuple[str, ...] = ()
 
     def permits_path(self, path: str) -> bool:
         """
@@ -56,18 +59,22 @@ class InstancePolicy:
         string might mean.
         """
         return any(
-            path == prefix or path.startswith(prefix.rstrip('/') + '/')
-            for prefix in self.path_prefixes
+            path == prefix or path.startswith(prefix.rstrip("/") + "/") for prefix in self.path_prefixes
         )
+
+    def permits_administration(self, family: str) -> bool:
+        """Whether this instance may use one reviewed administration family."""
+
+        return family in self.administration_families
 
 
 @dataclass(frozen=True)
 class BrokerConfig:
     openbao_url: str
-    kv_mount: str = 'secret'
+    kv_mount: str = "secret"
     namespace: str | None = None
-    auth_method: str = 'approle'
-    env_prefix: str = 'BROKER_BAO'
+    auth_method: str = "approle"
+    env_prefix: str = "BROKER_BAO"
     tls_verify: bool = True
     ca_cert_path: str | None = None
     instances: dict[str, InstancePolicy] = field(default_factory=dict)
@@ -108,25 +115,25 @@ def normalize_path(raw: str) -> str:
     Raises `ValueError` for anything unacceptable.
     """
     if not raw or not isinstance(raw, str):
-        raise ValueError('path must be a non-empty string')
+        raise ValueError("path must be a non-empty string")
 
-    if '\\' in raw:
-        raise ValueError('path contains an illegal character')
+    if "\\" in raw:
+        raise ValueError("path contains an illegal character")
 
-    if '%' in raw:
-        raise ValueError('path must not be percent-encoded')
+    if "%" in raw:
+        raise ValueError("path must not be percent-encoded")
 
-    if any(not ('\x21' <= character <= '\x7e') for character in raw):
-        raise ValueError('path must be printable ASCII without spaces')
+    if any(not ("\x21" <= character <= "\x7e") for character in raw):
+        raise ValueError("path must be printable ASCII without spaces")
 
-    if raw.startswith('/'):
-        raise ValueError('path must be relative to the KV mount')
+    if raw.startswith("/"):
+        raise ValueError("path must be relative to the KV mount")
 
-    segments = raw.split('/')
-    if any(segment in ('.', '..') for segment in segments):
-        raise ValueError('path must not contain relative segments')
+    segments = raw.split("/")
+    if any(segment in (".", "..") for segment in segments):
+        raise ValueError("path must not contain relative segments")
     if any(not segment for segment in segments):
-        raise ValueError('path must not contain empty segments')
+        raise ValueError("path must not contain empty segments")
 
     return raw
 
@@ -140,52 +147,71 @@ def load_config(path: str | None = None) -> BrokerConfig:
     request, which reads as a bug in the caller rather than as a
     misconfiguration here.
     """
-    config_path = Path(path or os.environ.get('BROKER_CONFIG', DEFAULT_CONFIG_PATH))
+    config_path = Path(path or os.environ.get("BROKER_CONFIG", DEFAULT_CONFIG_PATH))
     if not config_path.is_file():
-        raise ConfigError(f'No configuration at {config_path}. Set BROKER_CONFIG.')
+        raise ConfigError(f"No configuration at {config_path}. Set BROKER_CONFIG.")
 
-    with config_path.open('rb') as handle:
+    with config_path.open("rb") as handle:
         raw = tomllib.load(handle)
 
-    openbao = raw.get('openbao') or {}
-    url = os.environ.get('BROKER_OPENBAO_URL') or openbao.get('url')
+    openbao = raw.get("openbao") or {}
+    url = os.environ.get("BROKER_OPENBAO_URL") or openbao.get("url")
     if not url:
-        raise ConfigError('openbao.url is required (or set BROKER_OPENBAO_URL).')
+        raise ConfigError("openbao.url is required (or set BROKER_OPENBAO_URL).")
 
-    instances = {}
-    for name, spec in (raw.get('instances') or {}).items():
-        prefixes = spec.get('path_prefixes') or []
-        if not prefixes:
-            raise ConfigError(
-                f'Instance "{name}" declares no path_prefixes. An instance permitted to read '
-                f'everything is the situation this broker exists to prevent.'
-            )
-        for prefix in prefixes:
-            try:
-                normalize_path(prefix)
-            except ValueError as exc:
-                raise ConfigError(f'Instance "{name}" has an invalid prefix "{prefix}": {exc}') from None
-
-        instances[name] = InstancePolicy(
-            name=name,
-            path_prefixes=tuple(prefixes),
-            may_write=bool(spec.get('may_write', False)),
-            may_delete=bool(spec.get('may_delete', False)),
-        )
-
-    if not instances:
-        raise ConfigError('No instances configured. The broker would refuse every request.')
+    instances = _load_instances(raw.get("instances") or {})
 
     return BrokerConfig(
-        openbao_url=url.rstrip('/'),
-        kv_mount=openbao.get('kv_mount', 'secret'),
-        namespace=openbao.get('namespace') or None,
-        auth_method=openbao.get('auth_method', 'approle'),
-        env_prefix=openbao.get('env_prefix', 'BROKER_BAO'),
-        tls_verify=bool(openbao.get('tls_verify', True)),
-        ca_cert_path=openbao.get('ca_cert_path') or None,
+        openbao_url=url.rstrip("/"),
+        kv_mount=openbao.get("kv_mount", "secret"),
+        namespace=openbao.get("namespace") or None,
+        auth_method=openbao.get("auth_method", "approle"),
+        env_prefix=openbao.get("env_prefix", "BROKER_BAO"),
+        tls_verify=bool(openbao.get("tls_verify", True)),
+        ca_cert_path=openbao.get("ca_cert_path") or None,
         instances=instances,
     )
+
+
+def _load_instances(raw_instances: dict) -> dict[str, InstancePolicy]:
+    instances = {name: _instance_policy(name, spec) for name, spec in raw_instances.items()}
+    if not instances:
+        raise ConfigError("No instances configured. The broker would refuse every request.")
+    return instances
+
+
+def _instance_policy(name: str, spec: dict) -> InstancePolicy:
+    prefixes = spec.get("path_prefixes") or []
+    if not prefixes:
+        raise ConfigError(
+            f'Instance "{name}" declares no path_prefixes. An instance permitted to read '
+            f"everything is the situation this broker exists to prevent."
+        )
+    for prefix in prefixes:
+        try:
+            normalize_path(prefix)
+        except ValueError as exc:
+            raise ConfigError(f'Instance "{name}" has an invalid prefix "{prefix}": {exc}') from None
+    return InstancePolicy(
+        name=name,
+        path_prefixes=tuple(prefixes),
+        may_write=bool(spec.get("may_write", False)),
+        may_delete=bool(spec.get("may_delete", False)),
+        administration_families=_administration_families(name, spec),
+    )
+
+
+def _administration_families(name: str, spec: dict) -> tuple[str, ...]:
+    families = spec.get("administration_families") or []
+    if not isinstance(families, list) or not all(isinstance(item, str) for item in families):
+        raise ConfigError(f'Instance "{name}" has invalid administration_families.')
+    unknown = set(families) - ADMINISTRATION_FAMILIES
+    if unknown:
+        names = ", ".join(sorted(unknown))
+        raise ConfigError(f'Instance "{name}" has unknown administration families: {names}.')
+    if len(families) != len(set(families)):
+        raise ConfigError(f'Instance "{name}" has duplicate administration families.')
+    return tuple(sorted(families))
 
 
 def read_secret_env(name: str) -> str | None:
@@ -200,12 +226,12 @@ def read_secret_env(name: str) -> str | None:
     if value:
         return value.strip()
 
-    path = os.environ.get(f'{name}_FILE')
+    path = os.environ.get(f"{name}_FILE")
     if path:
         try:
             return Path(path).read_text().strip()
         except OSError as exc:
             # The path is operator-supplied configuration, not a secret, so
             # naming it makes the misconfiguration diagnosable.
-            raise ConfigError(f'Cannot read {name}_FILE ({path}): {exc.strerror}') from None
+            raise ConfigError(f"Cannot read {name}_FILE ({path}): {exc.strerror}") from None
     return None
