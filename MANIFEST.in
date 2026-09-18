@@ -1,0 +1,9 @@
+include AGENTS.md
+include CHANGELOG.md
+include CLAUDE.md
+include Dockerfile
+recursive-include .gitea *.yml
+recursive-include .github *.yml
+recursive-include deploy *.example *.service *.yml
+recursive-include docs *.md
+recursive-include scripts *.py

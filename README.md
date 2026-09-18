@@ -1,9 +1,14 @@
 # netbox-openbao-broker
 
 An optional service that holds the OpenBao AppRole so that
-[`netbox-openbao`](https://git.nmulti.cloud/emersonfelipesp/netbox-openbao) —
+[`netbox-openbao`](https://github.com/emersonfelipesp/netbox-openbao) —
 and therefore NetBox — never possesses credentials able to read production
 secret material directly.
+
+Install the released service from PyPI with
+`pip install netbox-openbao-broker`. Release maintainers should follow the
+[package release procedure](docs/releasing.md); published changes are recorded
+in the [changelog](CHANGELOG.md).
 
 ```
 NetBox ──mTLS──▶ Broker ──AppRole──▶ OpenBao

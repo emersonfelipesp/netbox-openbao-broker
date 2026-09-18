@@ -55,7 +55,10 @@ def _make_ca(tmp):
         .public_key(key.public_key()).serial_number(x509.random_serial_number())
         .not_valid_before(now - datetime.timedelta(days=1))
         .not_valid_after(now + datetime.timedelta(days=1))
-        .add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True)
+        .add_extension(x509.BasicConstraints(ca=True, path_length=0), critical=True)
+        .add_extension(
+            x509.SubjectKeyIdentifier.from_public_key(key.public_key()), critical=False,
+        )
         .add_extension(
             x509.KeyUsage(
                 digital_signature=True, key_cert_sign=True, crl_sign=True,
@@ -81,16 +84,37 @@ def _issue(tmp, ca_key, ca_cert, cn, filename, server=False):
         .not_valid_before(now - datetime.timedelta(days=1))
         .not_valid_after(now + datetime.timedelta(days=1))
     )
-    # Assert the usage the certificate is actually presented for. OpenSSL will
-    # refuse one that does not, and the failure is a bare connection reset with
-    # nothing logged on either side.
+    # Strict OpenSSL versions require a complete, internally consistent chain:
+    # CA SKI, matching leaf AKI, CA/leaf basic constraints, leaf key usage, and
+    # the EKU for the certificate's actual TLS role. Missing any of these can
+    # fail before the broker receives a request and invalidate the mTLS suite.
     usage = x509.ExtendedKeyUsage(
         [ExtendedKeyUsageOID.SERVER_AUTH] if server else [ExtendedKeyUsageOID.CLIENT_AUTH]
     )
     builder = (
         builder
+        .add_extension(
+            x509.AuthorityKeyIdentifier.from_issuer_subject_key_identifier(
+                ca_cert.extensions.get_extension_for_class(x509.SubjectKeyIdentifier).value
+            ),
+            critical=False,
+        )
         .add_extension(usage, critical=False)
         .add_extension(x509.BasicConstraints(ca=False, path_length=None), critical=True)
+        .add_extension(
+            x509.KeyUsage(
+                digital_signature=True,
+                content_commitment=False,
+                key_encipherment=True,
+                data_encipherment=False,
+                key_agreement=False,
+                key_cert_sign=False,
+                crl_sign=False,
+                encipher_only=False,
+                decipher_only=False,
+            ),
+            critical=True,
+        )
     )
     if server:
         builder = builder.add_extension(
@@ -107,6 +131,22 @@ def _issue(tmp, ca_key, ca_cert, cn, filename, server=False):
         encryption_algorithm=serialization.NoEncryption(),
     ))
     return cert_path, key_path
+
+
+def test_test_pki_has_a_strict_verifiable_extension_chain(tmp_path):
+    ca_key, ca_cert, _ = _make_ca(tmp_path)
+    leaf_path, _ = _issue(tmp_path, ca_key, ca_cert, 'localhost', 'leaf', server=True)
+    leaf = x509.load_pem_x509_certificate(leaf_path.read_bytes())
+
+    ca_ski = ca_cert.extensions.get_extension_for_class(x509.SubjectKeyIdentifier).value.digest
+    leaf_aki = leaf.extensions.get_extension_for_class(x509.AuthorityKeyIdentifier).value
+    assert leaf_aki.key_identifier == ca_ski
+    assert ca_cert.extensions.get_extension_for_class(x509.BasicConstraints).value.path_length == 0
+    assert leaf.extensions.get_extension_for_class(x509.BasicConstraints).value.ca is False
+    assert leaf.extensions.get_extension_for_class(x509.KeyUsage).value.key_cert_sign is False
+    assert leaf.extensions.get_extension_for_class(x509.ExtendedKeyUsage).value == x509.ExtendedKeyUsage(
+        [ExtendedKeyUsageOID.SERVER_AUTH]
+    )
 
 
 def _free_port():

@@ -28,8 +28,10 @@ Each of these looks like a mistake and is not. Verify before "fixing".
   unrelated to the code under test. Do not "simplify" it back.
 
 - **Test certificates need `ExtendedKeyUsage`** — `clientAuth` or `serverAuth`.
-  Without it OpenSSL refuses with a bare connection reset and nothing logged on
-  either side.
+  The test CA also needs `SubjectKeyIdentifier`, every leaf needs a matching
+  `AuthorityKeyIdentifier`, and CA/leaf `BasicConstraints` and `KeyUsage` must
+  describe their actual roles. Strict OpenSSL versions refuse an incomplete
+  chain with a bare connection reset before the broker sees a request.
 
 - **`docs_url=None` alone does not stop FastAPI serving `/openapi.json`.**
   `openapi_url=None` is what does. CI greps for this as well as testing it.
@@ -139,6 +141,11 @@ pytest && ruff check .
 
 The whole suite is self-contained — no NetBox, no database, no live OpenBao —
 so there is no excuse for pushing without running it.
+
+The supported CI matrix is Python 3.11, 3.12, and 3.14. Every leg must run a
+non-empty suite with zero skips. Package releases additionally follow
+[`docs/releasing.md`](docs/releasing.md); public artifacts must be built from a
+validated existing tag on canonical `main`, never from a working checkout.
 
 For an end-to-end check against a real OpenBao, build the image and run it with
 `deploy/docker-compose.yml`; that is what surfaced the startup-credential and
