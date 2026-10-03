@@ -15,6 +15,7 @@ GIT = Path("/usr/bin/git")
 PUBLIC = ROOT / ".github/workflows/publish.yml"
 GITEA = ROOT / ".gitea/workflows/publish-package.yml"
 CI = ROOT / ".github/workflows/ci.yml"
+MIRROR = ROOT / ".gitea/workflows/mirror-github.yml"
 REF_VALIDATOR = ROOT / "scripts/validate_release_ref.py"
 ROUTE_SELECTOR = ROOT / "scripts/select_public_release_target.py"
 DIST_VALIDATOR = ROOT / "scripts/validate_distributions.py"
@@ -57,7 +58,26 @@ def _repository(tmp_path: Path) -> Path:
     return repository
 
 
-@pytest.mark.parametrize("path", [PUBLIC, GITEA, CI])
+def _workflow_document(path: Path) -> dict:
+    document = yaml.safe_load(path.read_text(encoding="utf-8"))
+    assert isinstance(document, dict)
+    if True in document and "on" not in document:
+        document = dict(document)
+        document["on"] = document.pop(True)
+    return document
+
+
+def _mirror_script() -> str:
+    workflow = yaml.safe_load(MIRROR.read_text(encoding="utf-8"))
+    for step in workflow["jobs"]["mirror"]["steps"]:
+        if step.get("name") == "Mirror triggering branch":
+            script = step.get("run")
+            assert isinstance(script, str)
+            return script
+    raise AssertionError("Mirror triggering branch step not found")
+
+
+@pytest.mark.parametrize("path", [PUBLIC, GITEA, CI, MIRROR])
 def test_workflow_yaml_and_shell_blocks_parse(path: Path) -> None:
     workflow = yaml.safe_load(path.read_text(encoding="utf-8"))
     assert isinstance(workflow, dict)
@@ -107,6 +127,47 @@ def test_public_credentials_are_target_isolated() -> None:
     assert "needs.validate-build.outputs.target == 'testpypi'" in text
     assert "needs.validate-build.outputs.target == 'pypi'" in text
     assert text.count("attestations: false") == 2
+
+
+def test_mirror_trigger_admits_only_workflow_dispatch() -> None:
+    trigger = _workflow_document(MIRROR)["on"]
+    assert isinstance(trigger, dict)
+    assert set(trigger) == {"workflow_dispatch"}
+    assert "push" not in trigger
+
+
+def test_mirror_job_admits_only_canonical_repository_and_main_ref() -> None:
+    mirror_job = yaml.safe_load(MIRROR.read_text(encoding="utf-8"))["jobs"]["mirror"]
+    assert mirror_job["if"] == (
+        "${{ github.repository == 'emersonfelipesp/netbox-openbao-broker' "
+        "&& github.ref == 'refs/heads/main' }}"
+    )
+
+
+def test_mirror_job_preserves_destination_credentials() -> None:
+    env = yaml.safe_load(MIRROR.read_text(encoding="utf-8"))["jobs"]["mirror"]["env"]
+    assert env["GH_TOKEN"] == "${{ secrets.GH_MIRROR_TOKEN }}"
+    assert env["GITHUB_TOKEN"] == "${{ secrets.GH_MIRROR_TOKEN }}"
+    assert env["GITEA_SOURCE_TOKEN"] == "${{ secrets.SOURCE_MIRROR_TOKEN }}"
+    assert env["GITHUB_OWNER"] == "emersonfelipesp"
+
+
+def test_mirror_shell_preserves_fixed_branch_and_destination_repositories() -> None:
+    script = _mirror_script()
+    assert 'mirror_branch="${GITHUB_REF_NAME:?}"' in script
+    assert 'source_repository="${GITHUB_REPOSITORY:?}"' in script
+    assert 'case "${mirror_branch}" in' in script
+    assert "Ref ${mirror_branch} is not approved for GitHub mirroring." in script
+    assert 'target_repo="${GITHUB_OWNER}/${repo_name}"' in script
+    assert "https://git.nmulti.cloud/${source_repository}.git" in script
+    assert "https://github.com/${target_repo}.git" in script
+
+
+def test_mirror_shell_refuses_protected_branch_ancestry_divergence() -> None:
+    script = _mirror_script()
+    assert "merge-base --is-ancestor" in script
+    assert "has diverged from Gitea; refusing to overwrite a protected branch." in script
+    assert 'refs/heads/${mirror_branch}' in script
 
 
 def test_gitea_publication_uses_only_package_write_token() -> None:
