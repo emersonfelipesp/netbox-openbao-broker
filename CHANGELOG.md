@@ -3,6 +3,14 @@
 All notable changes to `netbox-openbao-broker` are documented here. Published
 versions are immutable; corrections use a new release or `.postN` version.
 
+## Unreleased
+
+- Upgrade to FastAPI standard 0.142.2 and record the resolved dependencies.
+- Add opt-in native HTTP and WebSocket telemetry with URL and exception privacy
+  filters, preserved operator controls, and caller-owned provider support.
+- Verify actual local OTLP signals and privacy without changing certificate
+  authentication, secret auditing, or the bounded administration contract.
+
 ## 0.1.0 — 2026-09-18
 
 Initial public release.

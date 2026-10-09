@@ -132,6 +132,15 @@ the OpenBao policy in `docs/deployment.md` aligned — refusing delete at either
 limit produces the same residue, with the added confusion of configuration that
 says otherwise.
 
+## Telemetry
+
+Remote telemetry is opt-in. Do not add a default collector, forward the secret
+audit stream through native FastAPI logging, or include caller-controlled URL
+values or exception text in exported records. Keep privacy processors attached
+to the selected explicit or global SDK providers before exporter setup. The
+subprocess probes decode actual OTLP payloads and include a raw control to prove
+that secret canaries would be detected without the filters.
+
 ## Development
 
 ```bash
@@ -150,3 +159,30 @@ validated existing tag on canonical `main`, never from a working checkout.
 For an end-to-end check against a real OpenBao, build the image and run it with
 `deploy/docker-compose.yml`; that is what surfaced the startup-credential and
 unaudited-500 defects that in-process tests had passed straight over.
+
+### Caller-managed telemetry privacy
+
+Sanitize selected real SDK providers even when all endpoint environment values are
+empty or auto_configure=False. Gate only Proxy-to-SDK creation on endpoint and
+signal exporter eligibility. Preserve caller identity and shutdown ownership,
+and register privacy processors before caller log exporters. The actual
+empty-caller loopback regression must retain path, query and exception redaction.
+
+Native `tracing=False` and `logs=False` also prevent creation of the corresponding
+implicit SDK provider, independently of environment endpoint eligibility. Existing
+selected SDK providers retain scoped sanitation and caller ownership.
+
+When OTEL_SDK_DISABLED=true, copy the caller configuration and disable native
+tracing, metrics, logs, and automatic configuration. Preserve the original
+mapping and selected SDK provider identity and ownership. Keep scoped privacy
+registration on existing providers while preventing implicit provider creation.
+The explicit/global disabled regression must activate caller exporters before
+construction, exercise repeated native success, validation, and error requests,
+and force-flush metrics while disabled. Exporters registered before privacy
+filters retain the documented temporal limitation; later privacy assertions
+must observe an exporter registered after those filters.
+
+Native FastAPI 0.143.0 automatic telemetry setup is opt-in through
+`FASTAPI_OTEL_AUTO_CONFIGURE=true`. An explicit `telemetry` mapping value for
+`auto_configure` takes precedence. Endpoint values alone do not enable automatic
+setup. Existing caller providers retain scoped privacy and caller ownership.

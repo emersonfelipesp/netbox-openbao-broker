@@ -136,6 +136,66 @@ The broker refuses to start unless `BROKER_TLS_CERT`, `BROKER_TLS_KEY`, and
 `BROKER_TLS_CLIENT_CA` are all set. Serving without client certificates would
 leave every request unauthenticated while looking healthy.
 
+## Optional native OpenTelemetry
+
+FastAPI 0.143.0 provides HTTP traces, request-duration metrics, validation and
+exception logs, and WebSocket traces and exception logs through the application
+lifespan. This service does not set a collector endpoint or a service name.
+Remote export requires explicit native automatic setup and an operator-configured endpoint.
+
+To opt in, configure an OTLP HTTP collector in the deployment environment:
+
+```bash
+FASTAPI_OTEL_AUTO_CONFIGURE=true
+OTEL_SERVICE_NAME=netbox-openbao-broker
+OTEL_EXPORTER_OTLP_ENDPOINT=https://collector.example.com
+```
+
+The generic endpoint receives `/v1/traces`, `/v1/metrics`, and `/v1/logs`.
+`OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`, `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT`, and
+`OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` select complete per-signal URLs.
+`OTEL_EXPORTER_OTLP_HEADERS` configures collector authentication; keep credentials
+in the deployment secret store. `OTEL_SDK_DISABLED=true` disables the SDK.
+The broker copies caller telemetry configuration and disables native tracing,
+metrics, logs, and automatic configuration while this control is set. It does
+not mutate the caller's mapping or replace or shut down caller-owned providers.
+Existing selected SDK providers retain scoped privacy processing, and implicit
+SDK provider creation is disabled.
+`OTEL_TRACES_EXPORTER=none`, `OTEL_METRICS_EXPORTER=none`, and
+`OTEL_LOGS_EXPORTER=none` independently disable native export. Empty endpoint
+values are preserved; a configured per-signal endpoint can still enable that
+signal. No broker configuration value overrides these controls.
+
+Native traces retain route templates and status codes, but replace raw URL paths
+and query values with `REDACTED`. Native exception logs retain error classes and
+remove exception messages and stack traces. Native telemetry does not export
+request or response bodies, authorization headers, cookies, AppRole material, or
+secret values. The separate security audit log keeps its existing local JSON
+contract; enabling telemetry does not forward that log through the native
+FastAPI logger or replace its independent audit sink.
+
+Embedding applications may pass FastAPI's `TelemetryConfig` as the keyword-only
+`telemetry` argument to `create_app`. Privacy processors attach to the selected
+SDK providers before native exporter setup, including explicit providers and
+pre-existing global providers. Sanitation also applies when every endpoint environment
+value is empty and native automatic configuration is disabled. Endpoint eligibility
+controls only creation of default SDK providers; it never exempts active caller
+providers from sanitation. Provider identities and their resources are
+preserved, and application shutdown does not shut down caller-owned providers.
+Non-SDK providers and exporters installed by callers remain the caller's
+responsibility. These filters cover native FastAPI telemetry, not arbitrary
+application logging, other instrumentation, or independently installed exporters.
+A caller's processor registered before these filters can observe original data.
+The explicit/global fresh-process regression installs an exporter before
+construction to observe disabled application logging. It exercises repeated
+success, validation, and error requests and flushes metrics while disabled.
+Later privacy assertions use an exporter registered after the privacy filters;
+they do not claim retroactive protection for the earlier exporter.
+
+The generated `uv.lock` records the validated dependency resolution. For local
+verification, run `uv sync --frozen --extra dev` followed by
+`uv run --no-sync pytest -q -ra` and `uv run --no-sync ruff check .`.
+
 ## Configuration
 
 TOML at `/etc/netbox-openbao-broker/config.toml`, or wherever `BROKER_CONFIG`
@@ -361,3 +421,12 @@ disclosure.
 ## License
 
 Apache-2.0.
+
+Native `tracing=False` and `logs=False` also prevent creation of the corresponding
+implicit SDK provider, independently of environment endpoint eligibility. Existing
+selected SDK providers retain scoped sanitation and caller ownership.
+
+Native FastAPI 0.143.0 automatic telemetry setup is opt-in through
+`FASTAPI_OTEL_AUTO_CONFIGURE=true`. An explicit `telemetry` mapping value for
+`auto_configure` takes precedence. Endpoint values alone do not enable automatic
+setup. Existing caller providers retain scoped privacy and caller ownership.

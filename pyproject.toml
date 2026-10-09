@@ -11,7 +11,7 @@ readme = {file = "README.md", content-type = "text/markdown"}
 license = "Apache-2.0"
 authors = [{name = "Emerson Felipe", email = "emerson.felipe@nmultifibra.com.br"}]
 dependencies = [
-    "fastapi>=0.115",
+    "fastapi[standard]>=0.143.0,<0.144",
     "uvicorn[standard]>=0.30",
     "hvac>=2.3.0",
     "pydantic>=2.9",

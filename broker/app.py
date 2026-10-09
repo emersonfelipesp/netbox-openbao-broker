@@ -19,12 +19,14 @@ Every request follows the same three steps, in this order:
 from __future__ import annotations
 
 import logging
+import os
 import tempfile
 import uuid
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.telemetry import TelemetryConfig
 from pydantic import BaseModel, Field
 from starlette.background import BackgroundTask
 from starlette.concurrency import run_in_threadpool
@@ -33,6 +35,7 @@ from .administration import CONTRACT_DIGEST, contract_document, operation_contra
 from .audit import AuditLog
 from .config import BrokerConfig, InstancePolicy, normalize_path
 from .identity import IdentityError, identity_from_scope
+from .telemetry import configure_log_privacy, configure_trace_privacy
 from .vault import MAX_SNAPSHOT_BYTES, VaultClient, VaultError, VaultMutationUnknown
 
 __all__ = ("create_app",)
@@ -89,8 +92,29 @@ class Caller:
         self.request_id = request_id
 
 
-def create_app(config: BrokerConfig, vault: VaultClient | None = None, audit: AuditLog | None = None):
+def create_app(
+    config: BrokerConfig,
+    vault: VaultClient | None = None,
+    audit: AuditLog | None = None,
+    *,
+    telemetry: TelemetryConfig | None = None,
+) -> FastAPI:
+    configuration: TelemetryConfig = dict(telemetry or {})
+    if os.getenv("OTEL_SDK_DISABLED", "").lower() == "true":
+        configuration.update(auto_configure=False, tracing=False, metrics=False, logs=False)
+    auto_configure = configuration.get(
+        "auto_configure", os.getenv("FASTAPI_OTEL_AUTO_CONFIGURE", "").lower() == "true"
+    )
+    configure_log_privacy(
+        configuration.get("logger_provider"),
+        auto_configure=auto_configure and configuration.get("logs", True),
+    )
+    configure_trace_privacy(
+        configuration.get("tracer_provider"),
+        auto_configure=auto_configure and configuration.get("tracing", True),
+    )
     app = FastAPI(
+        telemetry=configuration,
         title="netbox-openbao broker",
         description=(
             "Holds the OpenBao AppRole so NetBox never possesses credentials able to read "
